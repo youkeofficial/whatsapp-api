@@ -8,6 +8,20 @@ const MAX_RECONNECT_DELAY_MS = 30_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 
 /**
+ * Cache de la version Baileys au niveau module : fetchLatestBaileysVersion fait
+ * une requête HTTP à chaque appel — inutile de la refaire sur chaque reconnexion.
+ * La version est stable jusqu'au prochain redémarrage du service.
+ */
+let _cachedVersion = null;
+async function getBaileysVersion() {
+    if (!_cachedVersion) {
+        const { version } = await fetchLatestBaileysVersion();
+        _cachedVersion = version;
+    }
+    return _cachedVersion;
+}
+
+/**
  * Représente une session WhatsApp autonome associée à un numéro unique.
  * Gère son propre cycle de vie (connexion, reconnexion, déconnexion, événements).
  */
@@ -41,7 +55,7 @@ export class WhatsAppSession {
 
         try {
             const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-            const { version } = await fetchLatestBaileysVersion();
+            const version = await getBaileysVersion();
 
             this.sock = makeWASocket({
                 version,

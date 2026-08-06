@@ -194,6 +194,7 @@ router.post('/send-bulk', async (req, res) => {
     const msgErr = validateMessage(message);
     if (msgErr) return res.status(422).json({ error: msgErr });
 
+    const safeDelay = Math.max(500, parseInt(delayMs, 10) || 2000);
     const jobId = crypto.randomUUID();
     const bulkJobs = getBulkJobs(req);
     bulkJobs.set(jobId, { status: 'processing', total: numbers.length, sent: 0, failed: [], results: [], createdAt: Date.now() });
@@ -202,18 +203,33 @@ router.post('/send-bulk', async (req, res) => {
 
     (async () => {
         const job = bulkJobs.get(jobId);
+        const session = req.session;
+
         for (const number of numbers) {
+            if (!session.isReady) {
+                job.failed.push(number);
+                job.results.push({ number, success: false, error: 'Session WhatsApp déconnectée pendant le traitement.' });
+                continue;
+            }
+
             try {
-                await req.session.getSock().sendMessage(toJid(number), { text: message });
+                await session.getSock().sendMessage(toJid(number), { text: message });
                 job.sent++;
                 job.results.push({ number, success: true });
             } catch (err) {
                 job.failed.push(number);
                 job.results.push({ number, success: false, error: err.message });
             }
-            await sleep(delayMs);
+            await sleep(safeDelay);
         }
-        job.status = 'done';
+
+        if (job.failed.length === 0) {
+            job.status = 'done';
+        } else if (job.sent > 0) {
+            job.status = 'partial_failure';
+        } else {
+            job.status = 'failed';
+        }
     })().catch((err) => {
         console.error('Erreur bulk :', err);
         const job = bulkJobs.get(jobId);

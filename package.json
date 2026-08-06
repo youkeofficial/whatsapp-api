@@ -7,7 +7,7 @@
     "start": "node index.js",
     "pair": "node pair.js",
     "mcp": "node mcp-server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",

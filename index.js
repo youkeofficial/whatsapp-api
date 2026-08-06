@@ -1,9 +1,7 @@
 import 'dotenv/config';
-import crypto from 'node:crypto';
 import express from 'express';
 
 import { sessionManager } from './src/sessionManager.js';
-import { isValidTimingSafe } from './src/utils.js';
 
 import adminRoutes from './src/routes/adminRoutes.js';
 import messageRoutes from './src/routes/messageRoutes.js';
@@ -91,7 +89,9 @@ process.on('uncaughtException', (err) => console.error('Exception non capturée 
 
 // ─── Arrêt propre ─────────────────────────────────────────────────────────────
 async function shutdown(signal) {
-    console.log(`${signal} reçu — arrêt en cours...`);
+    console.log(`${signal} reçu — arrêt propre de toutes les sessions en cours...`);
+    await sessionManager.closeAll();
+    console.log('✅ Toutes les sessions sont fermées.');
     process.exit(0);
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WhatsAppSession } from './whatsappSession.js';
-import { generateApiKey } from './utils.js';
+import { generateApiKey, encryptApiKey, decryptApiKey } from './utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -12,19 +12,24 @@ const SESSIONS_FILE = path.join(ROOT, 'sessions.json');
 /**
  * Gestionnaire central des sessions WhatsApp multi-numéros.
  *
- * Persistance légère en JSON (`sessions.json`) : sessionId, label, apiKey, webhookUrl.
+ * Persistance légère en JSON (`sessions.json`) : sessionId, label, apiKey (chiffrée), webhookUrl.
  * Les données d'authentification Baileys sont isolées dans `auth_sessions/<sessionId>/`.
+ * Les clés API sont chiffrées avec AES-256-GCM (MASTER_API_KEY) avant écriture sur disque.
  */
 class SessionManager {
     constructor() {
         /** @type {Map<string, WhatsAppSession>} sessionId -> session */
         this._sessions = new Map();
 
-        /** @type {Map<string, string>} apiKey -> sessionId */
+        /** @type {Map<string, string>} apiKey (en clair) -> sessionId */
         this._keyIndex = new Map();
 
-        /** @type {object[]} métadonnées persistées */
+        /** @type {object[]} métadonnées persistées (apiKey chiffrée sur disque) */
         this._meta = [];
+
+        /** @type {boolean} protection contre les écritures concurrentes */
+        this._saveInProgress = false;
+        this._pendingSave = false;
     }
 
     // ─── Initialisation ──────────────────────────────────────────────────────
@@ -35,9 +40,15 @@ class SessionManager {
 
         const startPromises = [];
         for (const m of this._meta) {
+            const plainApiKey = decryptApiKey(m.apiKey);
+            if (!plainApiKey) {
+                console.warn(`[SessionManager] Impossible de déchiffrer la clé API de ${m.sessionId} — session ignorée.`);
+                continue;
+            }
+
             const session = this._createSession(m);
             this._sessions.set(m.sessionId, session);
-            this._keyIndex.set(m.apiKey, m.sessionId);
+            this._keyIndex.set(plainApiKey, m.sessionId);
             startPromises.push(session.start().catch((err) => {
                 console.error(`[SessionManager] Impossible de démarrer ${m.sessionId} :`, err.message);
             }));
@@ -53,22 +64,32 @@ class SessionManager {
      */
     async create({ label = '', webhookUrl = '' } = {}) {
         const sessionId = `sess_${Date.now()}`;
-        const apiKey = generateApiKey();
-        const meta = { sessionId, label, apiKey, webhookUrl, createdAt: Date.now() };
+        const plainApiKey = generateApiKey();
+        const encryptedApiKey = encryptApiKey(plainApiKey);
+
+        const meta = {
+            sessionId,
+            label,
+            apiKey: encryptedApiKey,
+            webhookUrl,
+            createdAt: Date.now(),
+        };
 
         this._meta.push(meta);
-        this._saveMeta();
+        await this._saveMeta();
 
         const session = this._createSession(meta);
         this._sessions.set(sessionId, session);
-        this._keyIndex.set(apiKey, sessionId);
+        this._keyIndex.set(plainApiKey, sessionId);
 
         await session.start();
-        return { sessionId, apiKey, label, webhookUrl };
+
+        // Retourner la clé en clair une seule fois (jamais stockée ainsi)
+        return { sessionId, apiKey: plainApiKey, label, webhookUrl };
     }
 
     /**
-     * Supprime une session (déconnecte + supprime les metadonnées + laisse auth_sessions/ intacte).
+     * Supprime une session (déconnecte + supprime les métadonnées).
      */
     async remove(sessionId) {
         const session = this._sessions.get(sessionId);
@@ -80,15 +101,21 @@ class SessionManager {
         const metaIdx = this._meta.findIndex((m) => m.sessionId === sessionId);
         if (metaIdx !== -1) {
             const [removed] = this._meta.splice(metaIdx, 1);
-            this._keyIndex.delete(removed.apiKey);
-            this._saveMeta();
+            // Retrouver la clé en clair depuis le keyIndex pour la supprimer
+            for (const [plain, sid] of this._keyIndex) {
+                if (sid === sessionId) {
+                    this._keyIndex.delete(plain);
+                    break;
+                }
+            }
+            await this._saveMeta();
         }
     }
 
     /**
      * Met à jour le webhookUrl ou le label d'une session.
      */
-    update(sessionId, fields = {}) {
+    async update(sessionId, fields = {}) {
         const metaIdx = this._meta.findIndex((m) => m.sessionId === sessionId);
         if (metaIdx === -1) throw new Error(`Session "${sessionId}" introuvable.`);
 
@@ -98,7 +125,7 @@ class SessionManager {
                 this._meta[metaIdx][key] = fields[key];
             }
         }
-        this._saveMeta();
+        await this._saveMeta();
 
         const session = this._sessions.get(sessionId);
         if (session && fields.webhookUrl !== undefined) {
@@ -124,15 +151,34 @@ class SessionManager {
         return this._meta.map((m) => {
             const session = this._sessions.get(m.sessionId);
             return {
-                ...m,
-                apiKey: undefined, // ne jamais renvoyer la clé dans la liste publique
+                sessionId: m.sessionId,
+                label: m.label,
+                webhookUrl: m.webhookUrl,
+                createdAt: m.createdAt,
+                // apiKey intentionnellement omise de la liste publique
                 status: session ? session.toStatus() : { isReady: false },
             };
         });
     }
 
     getMeta(sessionId) {
-        return this._meta.find((m) => m.sessionId === sessionId) ?? null;
+        const m = this._meta.find((m) => m.sessionId === sessionId);
+        if (!m) return null;
+
+        // Pour la route admin/:id, on inclut la clé déchiffrée
+        const plainApiKey = decryptApiKey(m.apiKey);
+        return { ...m, apiKey: plainApiKey };
+    }
+
+    /**
+     * Ferme proprement toutes les sessions (appelé au shutdown).
+     */
+    async closeAll() {
+        const closes = [];
+        for (const session of this._sessions.values()) {
+            closes.push(session.close().catch(() => {}));
+        }
+        await Promise.all(closes);
     }
 
     // ─── Internals ────────────────────────────────────────────────────────────
@@ -154,8 +200,26 @@ class SessionManager {
         }
     }
 
-    _saveMeta() {
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(this._meta, null, 2));
+    /**
+     * Sauvegarde asynchrone avec protection contre les écritures concurrentes :
+     * si une écriture est déjà en cours, la prochaine sera déclenchée à sa fin.
+     */
+    async _saveMeta() {
+        if (this._saveInProgress) {
+            this._pendingSave = true;
+            return;
+        }
+
+        this._saveInProgress = true;
+        try {
+            await fs.promises.writeFile(SESSIONS_FILE, JSON.stringify(this._meta, null, 2), 'utf8');
+        } finally {
+            this._saveInProgress = false;
+            if (this._pendingSave) {
+                this._pendingSave = false;
+                this._saveMeta().catch((err) => console.error('[SessionManager] Erreur sauvegarde différée :', err));
+            }
+        }
     }
 }
 

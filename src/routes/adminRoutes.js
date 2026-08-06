@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import QRCode from 'qrcode';
 import { sessionManager } from '../sessionManager.js';
-import { isValidTimingSafe } from '../utils.js';
+import { isValidTimingSafe, validateWebhookUrl } from '../utils.js';
 
 const router = Router();
 
@@ -33,6 +33,10 @@ router.get('/sessions/:id', (req, res) => {
 // POST /admin/sessions — Crée une nouvelle session
 router.post('/sessions', async (req, res) => {
     const { label = '', webhookUrl = '' } = req.body;
+
+    const urlError = validateWebhookUrl(webhookUrl);
+    if (urlError) return res.status(422).json({ error: urlError });
+
     try {
         const result = await sessionManager.create({ label, webhookUrl });
         res.status(201).json(result);
@@ -42,9 +46,13 @@ router.post('/sessions', async (req, res) => {
 });
 
 // PATCH /admin/sessions/:id — Met à jour label ou webhookUrl
-router.patch('/sessions/:id', (req, res) => {
+router.patch('/sessions/:id', async (req, res) => {
+    if (req.body.webhookUrl !== undefined) {
+        const urlError = validateWebhookUrl(req.body.webhookUrl);
+        if (urlError) return res.status(422).json({ error: urlError });
+    }
     try {
-        const updated = sessionManager.update(req.params.id, req.body);
+        const updated = await sessionManager.update(req.params.id, req.body);
         res.json(updated);
     } catch (err) {
         res.status(404).json({ error: err.message });

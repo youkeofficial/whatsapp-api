@@ -48,36 +48,21 @@ router.patch('/picture', async (req, res) => {
     if (!url && !base64) return res.status(422).json({ error: 'url ou base64 requis' });
     const sock = req.session.getSock();
 
-    let imgBuffer;
-    if (base64) {
-        imgBuffer = Buffer.from(base64.replace(/^data:[^;]+;base64,/, ''), 'base64');
-    } else {
-        const response = await fetch(url);
-        imgBuffer = Buffer.from(await response.arrayBuffer());
-    }
-
     try {
+        let imgBuffer;
+        if (base64) {
+            imgBuffer = Buffer.from(base64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+        } else {
+            // fetch déplacé DANS le try/catch pour capturer les erreurs réseau
+            const response = await fetch(url);
+            if (!response.ok) {
+                return res.status(422).json({ error: `Impossible de récupérer l'image : HTTP ${response.status}` });
+            }
+            imgBuffer = Buffer.from(await response.arrayBuffer());
+        }
+
         await sock.updateProfilePicture(sock.user?.id, imgBuffer);
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// GET /profile/:number — Récupère le profil (statut + photo) d'un contact
-router.get('/:number', async (req, res) => {
-    const sock = req.session.getSock();
-    const jid = toJid(req.params.number);
-    try {
-        const [status, picture] = await Promise.allSettled([
-            sock.fetchStatus(jid),
-            sock.profilePictureUrl(jid, 'image'),
-        ]);
-        res.json({
-            jid,
-            status: status.status === 'fulfilled' ? status.value?.status : null,
-            picture: picture.status === 'fulfilled' ? picture.value : null,
-        });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -119,7 +104,11 @@ router.post('/read', async (req, res) => {
     }
 });
 
+// ─── Routes avec paramètre dynamique EN DERNIER pour éviter le masquage ────────
+
 // GET /profile/check/:number — Vérifie si un numéro est inscrit sur WhatsApp
+// ⚠️ DOIT être déclarée AVANT GET /:number (Express résout les routes statiques avant dynamiques
+//    uniquement si elles sont enregistrées dans le bon ordre)
 router.get('/check/:number', async (req, res) => {
     const sock = req.session.getSock();
     const jid = toJid(req.params.number);
@@ -130,6 +119,26 @@ router.get('/check/:number', async (req, res) => {
             number: req.params.number,
             jid,
             exists: !!found?.exists,
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// GET /profile/:number — Récupère le profil (statut + photo) d'un contact
+// ⚠️ Déclarée APRÈS /check/:number — sinon "check" serait capturé ici
+router.get('/:number', async (req, res) => {
+    const sock = req.session.getSock();
+    const jid = toJid(req.params.number);
+    try {
+        const [status, picture] = await Promise.allSettled([
+            sock.fetchStatus(jid),
+            sock.profilePictureUrl(jid, 'image'),
+        ]);
+        res.json({
+            jid,
+            status: status.status === 'fulfilled' ? status.value?.status : null,
+            picture: picture.status === 'fulfilled' ? picture.value : null,
         });
     } catch (e) {
         res.status(500).json({ error: e.message });

@@ -2,7 +2,7 @@
   "mcpServers": {
     "whatsapp-api": {
       "command": "node",
-      "args": ["C:/prog/whatstapp-service/mcp-server.js"],
+      "args": ["./mcp-server.js"],
       "env": {
         "WA_BASE_URL": "http://localhost:3020",
         "WA_API_KEY": "ak_VOTRE_CLE_DE_SESSION_ICI",
