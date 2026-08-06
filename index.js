@@ -1,5 +1,9 @@
 import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 import { sessionManager } from './src/sessionManager.js';
 
@@ -40,6 +44,10 @@ app.use((req, res, next) => {
     );
     next();
 });
+
+// ─── Dashboard Web Administrateur ─────────────────────────────────────────────
+app.use('/dashboard', express.static(path.join(__dirname, 'public')));
+app.get('/', (_req, res) => res.redirect('/dashboard'));
 
 // ─── Routes admin (clé maître, sans résolution de session) ───────────────────
 app.use('/admin', adminRoutes);
