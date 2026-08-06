@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import QRCode from 'qrcode';
 import { sessionManager } from '../sessionManager.js';
 import { isValidTimingSafe } from '../utils.js';
 
@@ -57,6 +58,40 @@ router.delete('/sessions/:id', async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         res.status(404).json({ error: err.message });
+    }
+});
+
+// GET /admin/sessions/:id/qr — Retourne le QR code en base64 PNG + data URL
+router.get('/sessions/:id/qr', async (req, res) => {
+    const session = sessionManager.getById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session introuvable.' });
+
+    if (session.isReady) {
+        return res.status(409).json({ error: 'Session déjà connectée, pas de QR nécessaire.' });
+    }
+
+    if (!session._lastQr) {
+        return res.status(202).json({
+            ready: false,
+            message: 'QR code pas encore généré par WhatsApp. Réessaie dans 2-3 secondes.',
+        });
+    }
+
+    try {
+        const dataUrl = await QRCode.toDataURL(session._lastQr, { width: 300, margin: 2 });
+        const svg = await QRCode.toString(session._lastQr, { type: 'svg' });
+
+        res.json({
+            ready: false,
+            sessionId: session.sessionId,
+            qr: {
+                dataUrl,          // img src="data:image/png;base64,..."
+                svg,              // SVG inline <svg>...</svg>
+                raw: session._lastQr, // chaîne brute Baileys (pour librairies clientes)
+            },
+        });
+    } catch (e) {
+        res.status(500).json({ error: 'Impossible de générer le QR code.', detail: e.message });
     }
 });
 
